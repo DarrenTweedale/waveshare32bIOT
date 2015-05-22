@@ -23,13 +23,12 @@ namespace ili9340
 
         public CWaveShare32b():base() { }
 
-        public void InitAll()
+        public async Task InitAll()
         {
             try
             {
-                base.InitAll();
-
-                 InitGpioButtons();
+                await base.InitAll();
+                await InitGpioButtons();
                
             }
             catch (Exception ex)
@@ -38,7 +37,7 @@ namespace ili9340
             }
         }
 
-        private  void InitGpioButtons()
+        private  async Task InitGpioButtons()
         {
             try
             {

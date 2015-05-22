@@ -19,12 +19,15 @@ namespace ili9340
         private const Int32 RESET_PIN = 27;
 
         // Based on ili9340, waveshare 3.2 v4
-        public const UInt32 SCREEN_WIDTH_PX = 320;                         /* Number of horizontal pixels on the display */
-        public const UInt32 SCREEN_HEIGHT_PX = 240;                         /* Number of vertical pixels on the display   */
+        public const UInt32 SCREEN_WIDTH_PX = 240;                         /* Number of horizontal pixels on the display */
+        public const UInt32 SCREEN_HEIGHT_PX = 320;                         /* Number of vertical pixels on the display   */
         private const UInt32 PIXELS_PER_PAGE = 8;
         private const UInt32 SCREEN_HEIGHT_PAGES = SCREEN_HEIGHT_PX / PIXELS_PER_PAGE;    /* The vertical pixels on this display are arranged into 'pages' of 8 pixels each */
-        private byte[,] DisplayBuffer = new byte[SCREEN_WIDTH_PX, SCREEN_HEIGHT_PX];                 /* A local buffer we use to store graphics data for the screen                    */
-        private byte[] SerializedDisplayBuffer = new byte[SCREEN_WIDTH_PX * SCREEN_HEIGHT_PX];                /* A temporary buffer used to prepare graphics data for sending over SPI          */
+
+        private CScanLine[] WorkingDisplayBuffer = new CScanLine[SCREEN_HEIGHT_PX];                 /* A local buffer we use to store graphics data for the screen                    */
+        private CScanLine[] CurrentDisplayBuffer = new CScanLine[SCREEN_HEIGHT_PX];                 /* A local buffer we use to store graphics data for the screen                    */
+
+        private byte[] SerializedDisplayBuffer = new byte[SCREEN_WIDTH_PX * SCREEN_HEIGHT_PX * 4];                /* A temporary buffer used to prepare graphics data for sending over SPI          */
 
         /* Definitions for SPI and GPIO */
         private SpiDevice SpiDisplay;       // lcd
@@ -56,17 +59,19 @@ namespace ili9340
         private const byte INVOFF = 0x20;
         private const byte INVON = 0x21;
 
-        private uint _width = 0;
-        private uint _height = 0;
+        public uint screenwidth { get; private set; }
+        public uint screenheight { get; private set; }
+
+        Queue<CDrawInstruction> drawQueue = new Queue<CDrawInstruction>();
 
 
 
         public Cili9340() { }
 
-        public async void InitAll()
+        public async Task InitAll()
         {
             try {       
-                InitGpioLCD();
+                await InitGpioLCD();
                 await InitSpiLCD();        //Initialize the SPI controller               
                 await InitDisplay();    //Initialize the display  
             } catch (Exception ex)
@@ -75,7 +80,7 @@ namespace ili9340
             }
         }
 
-        private void InitGpioLCD()
+        private async Task InitGpioLCD()
         {
             try
             {
@@ -184,7 +189,7 @@ namespace ili9340
 
                 // Memory access control = bgr + landscape     
 
-                RotateScreen(0);
+                RotateScreen(1);
                 //DisplaySendData(0x88);
                 //TFT_24S_Write_Command(0x0036); TFT_24S_Write_Data(0x0088);
 
@@ -262,26 +267,104 @@ namespace ili9340
             {
                 case 0:
                     DisplaySendData(MADCTL_MX | MADCTL_BGR);
-                    _width = SCREEN_WIDTH_PX;
-                    _height = SCREEN_HEIGHT_PX;
+                    screenwidth = SCREEN_WIDTH_PX;
+                    screenheight = SCREEN_HEIGHT_PX;
                     break;
                 case 1:
                     DisplaySendData(MADCTL_MV | MADCTL_BGR);
-                    _width = SCREEN_HEIGHT_PX;
-                    _height = SCREEN_WIDTH_PX;
+                    screenwidth = SCREEN_HEIGHT_PX;
+                    screenheight = SCREEN_WIDTH_PX;
                     break;
                 case 2:
                     DisplaySendData(MADCTL_MY | MADCTL_BGR);
-                    _width = SCREEN_WIDTH_PX;
-                    _height = SCREEN_HEIGHT_PX;
+                    screenwidth = SCREEN_WIDTH_PX;
+                    screenheight = SCREEN_HEIGHT_PX;
                     break;
                 case 3:
                     DisplaySendData(MADCTL_MX | MADCTL_MY | MADCTL_MV | MADCTL_BGR);
-                    _width = SCREEN_HEIGHT_PX;
-                    _height = SCREEN_WIDTH_PX;
+                    screenwidth = SCREEN_HEIGHT_PX;
+                    screenheight = SCREEN_WIDTH_PX;
                     break;
             }
+            drawQueue.Clear();
+            WorkingDisplayBuffer = new CScanLine[screenheight];
+            CurrentDisplayBuffer = new CScanLine[screenheight];
         }
+
+        /**** ---- temp to try out **/
+        public void DrawFillRectTEMP(uint x, uint y, uint w, uint h, uint color)
+        {
+            if ((x >= screenwidth) || (y >= screenheight)) return;
+            if ((x + w - 1) >= screenwidth) w = screenwidth - x;
+            if ((y + h - 1) >= screenheight) h = screenheight - y;
+
+            if (w < 0 | h < 0) return;
+            /*for (y = h; y > 0; y--)
+            {
+                for (x = w; x > 0; x--)
+                {
+                    //PushColor(color);
+                    PushColorTEMP(x, y, color);
+                }
+            }*/
+            CDrawInstruction di = new CDrawInstruction(x, y, w, h);
+            byte[] data = new byte[w * h * 2];
+            byte hicolor = (byte)(color >> 8);
+            byte locolor = (byte)(color & 0xff);
+            for (int i=0; i<w*h; i++)
+            {
+                data[i * 2] = hicolor;
+                data[(i * 2)+1] = locolor;
+            }
+            di.data = data;
+
+            drawQueue.Enqueue(di);
+            //Task.Run(() => doInstruction(di));
+        }
+
+        private void doInstruction(CDrawInstruction di)
+        {
+            addressSet((uint)di.x, (uint)di.y, (uint)(di.w-1 + di.x), (uint)(di.h-1 + di.y));
+            DisplaySendData(di.data);     /* Send the data over SPI */
+            //Debug.WriteLine(di);
+        }
+
+        public void DrawPixelTEMP(uint x, uint y, uint color)
+        {
+            if ((x < 0) || (x >= screenwidth) || (y < 0) || (y >= screenheight)) return;
+
+            CDrawInstruction di = new CDrawInstruction(x, y, 1, 1);
+            byte hicolor = (byte)(color >> 8);
+            byte locolor = (byte)(color & 0xff);
+            di.data = new byte[] { hicolor, locolor }; ;
+            drawQueue.Enqueue(di);
+            //Task.Run(() => doInstruction(di));
+        }
+
+        public void DrawFastVLineTEMP(uint x, uint y, uint h, uint color)
+        {
+            DrawFillRectTEMP(x, y, 1, h, color);
+        }
+
+        public void DrawFastHLineTEMP(uint x, uint y, uint w, uint color)
+        {
+            DrawFillRectTEMP(x, y, w, 1, color);
+        }
+
+
+        public void PushColorTEMP(uint x, uint y, uint color)
+        {
+            //DisplaySendData(new byte[] { (byte)(color >> 8), (byte)(color & 0xff) });
+            WorkingDisplayBuffer[y].updateScanLine((int)x,new CPixel(color));
+        }
+
+        public void FillScreenTEMP(uint color)
+        {
+            DrawFillRectTEMP(0, 0, screenwidth, screenheight, color);
+        }
+
+
+        /****** end of temp *****/
 
         public void PushColor(uint color)
         {
@@ -291,7 +374,7 @@ namespace ili9340
 
         public void DrawPixel(uint x, uint y, uint color)
         {
-            if ((x < 0) || (x >= _width) || (y < 0) || (y >= _height)) return;
+            if ((x < 0) || (x >= screenwidth) || (y < 0) || (y >= screenheight)) return;
             addressSet(x, y, (x + 1), (y + 1));
             PushColor(color);
 //            Debug.WriteLine("x=" + x + " y=" + y);
@@ -299,9 +382,9 @@ namespace ili9340
 
         public void DrawFastVLine(uint x, uint y, uint h, uint color)
         {
-            if ((x >= _width) || (y >= _height)) return;
-            if ((y + h - 1) >= _height)
-                h = _height - y;
+            if ((x >= screenwidth) || (y >= screenheight)) return;
+            if ((y + h - 1) >= screenheight)
+                h = screenheight - y;
             addressSet(x, y, x, (y + h+1));
             while (h-- > 0)
             {
@@ -311,8 +394,8 @@ namespace ili9340
 
         public void DrawFastHLine(uint x, uint y, uint w, uint color)
         {
-            if ((x >= _width) || (y >= _height)) return;
-            if ((x + w - 1) >= _width) w = _width - x;
+            if ((x >= screenwidth) || (y >= screenheight)) return;
+            if ((x + w - 1) >= screenwidth) w = screenwidth - x;
             addressSet(x, y, x+w-1, y);
             while (w-- > 0)
             {
@@ -322,14 +405,14 @@ namespace ili9340
 
         public void FillScreen(uint color)
         {
-            DrawFillRect(0, 0, _width, _height, color);
+            DrawFillRect(0, 0, screenwidth, screenheight, color);
         }
 
         public void DrawFillRect(uint x, uint y, uint w, uint h, uint color)
         {
-            if ((x >= _width) || (y >= _height)) return;
-            if ((x + w - 1) >= _width) w = _width - x;
-            if ((y + h - 1) >= _height) h = _height - y;
+            if ((x >= screenwidth) || (y >= screenheight)) return;
+            if ((x + w - 1) >= screenwidth) w = screenwidth - x;
+            if ((y + h - 1) >= screenheight) h = screenheight - y;
 
             addressSet(x, y, (x+w-1), (y+h-1));
             for (y = h; y > 0; y--)
@@ -353,12 +436,37 @@ namespace ili9340
         }
 
 
+
         /* Send graphics data to the screen */
         private void DisplaySendData(byte[] Data)
         {
             /* When the Data/Command pin is high, SPI data is treated as graphics data  */
             DataCommandPin.Write(GpioPinValue.High);
-            SpiDisplay.Write(Data);
+
+            int maxSize = 50000;
+            if (Data.Length > maxSize)
+            {
+                for (var i = 0; i < (int)Math.Ceiling((float)Data.Length / maxSize); i++)
+                {
+                    int skip = (i * maxSize);
+                    int take = Math.Min(Data.Length - (skip), maxSize);
+                    SpiDisplay.Write(Data.Skip(skip).Take(take).ToArray<byte>());
+                    Debug.WriteLine(string.Format("data.length={0}, skip={1}, take={2}", Data.Length, skip, take));
+
+
+                    /*var s = Split
+                    foreach (byte t in Data)
+                    {
+                        SpiDisplay.Write(new byte[] { t });
+                    }*/
+                    //}
+                }
+            }
+            else
+            {
+                SpiDisplay.Write(Data);
+            }
+
         }
 
         private void DisplaySendData(byte data)
@@ -432,28 +540,17 @@ namespace ili9340
 
         /*----- CODE DOES WORK FROM HERE FOR NOW ---------*/
 
-        public void ClearScreen(int color)
+        public void ClearScreen(uint color)
         {
-            //DisplaySendCommand(0x2C);
-
-            var hcolor = (byte)(color >> 8);
-            var lcolor = (byte)(color & 0xff);
-            var data = new List<byte>();
-
-            //for (int i = 0; i < 32000; i++)
-            //{
-            //    data.Add(hcolor);
-            //    data.Add(lcolor);
-            //data.Add(hcolor);
-            //}
-
-            for (int PageY = 0; PageY < SCREEN_HEIGHT_PX; PageY++)
+            DrawFillRectTEMP(0, 0, screenwidth, screenheight, color);
+            /*
+            for (int PageY = 0; PageY < _height; PageY++)
             {
-                for (int PixelX = 0; PixelX < SCREEN_WIDTH_PX; PixelX++)
-                {
-                    DisplayBuffer[PixelX, PageY] = hcolor;
-                }
-            }
+                CScanLine sl = new CScanLine((int)_width, PageY);
+                sl.clearScanLine(color);
+
+                WorkingDisplayBuffer[PageY] = sl;
+            }*/
 
             /*
             addressSet(0, 0, (short)(SCREEN_WIDTH_PX - 1), (short)(SCREEN_HEIGHT_PX - 1));
@@ -474,28 +571,69 @@ namespace ili9340
 
         }
 
+        public async void DisplayUpdate()
+        {
+            //Task.Start(() => {
+                if (drawQueue.Count != 0) {
+                    CDrawInstruction di = drawQueue.Dequeue();
+                    doInstruction(di);
+                }
+            //});
+            
+        }
+
 
         ///* Writes the Display Buffer out to the physical screen for display */
-        public void DisplayUpdate()
+        public void DisplayUpdate2()
         {
             int Index = 0;
+            int diffYstart = -1;
+            int diffYend = -1;
+            int diffXstart = (int)screenwidth;
+            int diffXend = -1;
+
             /* We convert our 2-dimensional array into a serialized string of bytes that will be sent out to the display */
-            for (int PageY = 0; PageY < SCREEN_HEIGHT_PX; PageY++)
+            for (int PageY = 0; PageY < screenheight; PageY++)
             {
-                for (int PixelX = 0; PixelX < SCREEN_WIDTH_PX; PixelX++)
+                CScanLine sl = WorkingDisplayBuffer[PageY];
+                if (!sl.isDiff()) continue;
+
+                if (sl._colChangedStart!=0)
                 {
-                    SerializedDisplayBuffer[Index] = DisplayBuffer[PixelX, PageY];
-                    Index++;
+                    diffXstart = Math.Min(diffXstart, sl._colChangedStart);
                 }
+
+                if (sl._colChangedEnd != 0)
+                {
+                    diffXend = Math.Max(diffXend, sl._colChangedEnd);
+                }
+
+                if (diffYstart == -1)
+                    diffYstart = PageY;
+
+                diffYend = PageY;
+            }
+            if (diffXstart == -1 || diffXstart > diffXend) diffXstart = 1;
+            if (diffXend == -1 || diffXend < diffXstart) diffXend = (int)screenwidth;
+            Debug.WriteLine(String.Format("diff startx={0}, starty={1}, endx={2}, endy={3}", diffXstart, diffYstart, diffXend, diffYend));
+            if (diffYstart == -1) return;   // no diff
+
+            // Okay, we have the range of difference.
+            int w = ((diffXend - diffXstart) + 1);
+            List<byte> data = new List<byte>();
+            for (int PageY = diffYstart; PageY <= diffYend; PageY++)
+            {
+                CScanLine sl = WorkingDisplayBuffer[PageY];
+                //sl._colChangedStart = 0;
+                //sl._colChangedEnd = 0;
+                sl.resetChange();
+                data.AddRange(sl.getData(diffXstart, diffXend));
             }
 
-            /* Write the data out to the screen */
-            //DisplaySendCommand(CMD_RESETCOLADDR);         /* Reset the column address pointer back to 0 */
-            //DisplaySendCommand(CMD_RESETPAGEADDR);        /* Reset the page address pointer back to 0   */
+            addressSet((uint)diffXstart-1, (uint)diffYstart, (uint)diffXend-1, (uint)diffYend);
+
             //DisplaySendCommand(0x2C);
-            addressSet(0, 0, 320, 240);
-            DisplaySendData(SerializedDisplayBuffer);     /* Send the data over SPI */  
-            DisplaySendCommand(0x2C);
+            DisplaySendData(data.ToArray());     /* Send the data over SPI */
         }
 
 
@@ -593,7 +731,7 @@ namespace ili9340
             {
                 for (CurrentCol = StartCol; CurrentCol < EndCol; CurrentCol++)
                 {
-                    DisplayBuffer[CurrentCol, CurrentPage] = CharDescriptor.CharacterData[CharDataIndex];
+                    //WorkingDisplayBuffer[CurrentCol, CurrentPage] = new CPixel(CharDescriptor.CharacterData[CharDataIndex]);
                     CharDataIndex++;
                 }
             }
@@ -603,7 +741,7 @@ namespace ili9340
             {
                 for (; CurrentCol < EndCol + DisplayFontTable.FontCharSpacing; CurrentCol++)
                 {
-                    DisplayBuffer[CurrentCol, CurrentPage] = 0x00;
+                    //WorkingDisplayBuffer[CurrentCol, CurrentPage] = new CPixel(0);
                 }
             }
 
@@ -614,7 +752,7 @@ namespace ili9340
         /* Sets all pixels in the screen buffer to 0 */
         private void ClearDisplayBuf()
         {
-            Array.Clear(DisplayBuffer, 0, DisplayBuffer.Length);
+            Array.Clear(WorkingDisplayBuffer, 0, WorkingDisplayBuffer.Length);
         }
 
         /* Update the SPI display to mirror the textbox contents */
@@ -637,5 +775,145 @@ namespace ili9340
             }
         }
 
+    }
+
+    public class CPixel
+    {
+
+        public CPixel(uint color)
+        {
+            hicolor = (byte)(color >> 8);
+            locolor = (byte)(color & 0xff);
+        }
+
+        public CPixel(int color)
+        {
+            hicolor = (byte)(color >> 8);
+            locolor = (byte)(color & 0xff);
+        }
+
+        public byte hicolor { get; set; }
+        public byte locolor { get; set; }
+    }
+
+    public class CDrawInstruction
+    {
+
+        public CDrawInstruction(int x, int y, int w, int h)
+        {
+            this.x = x;
+            this.y = y;
+            this.w = w;
+            this.h = h;
+        }
+        public CDrawInstruction(uint x, uint y, uint w, uint h) ///: base ((int)x, (int)y, (int)w, (int)h)
+        {
+            this.x = (int)x;
+            this.y = (int)y;
+            this.w = (int)w;
+            this.h = (int)h;
+        }
+
+        public int x { get; set; }
+        public int y { get; set; }
+        public int w { get; set; }
+        public int h { get; set; }
+        public byte[] data { get; set; }
+
+        public override string ToString()
+        {
+            return string.Format("x={0,3} y={1,3} w={2,3} h={3,3) l={4,8}", x, y, w, h, 1);
+        }
+    }
+
+    public class CScanLine
+    {
+        private int _width = 0;
+        private int y = 0;
+        public int _colChangedStart { get; private set; }
+        public int _colChangedEnd { get; private set; }
+         private CPixel[] _data;
+        public CScanLine(int width, int y)
+        {
+            _data = new CPixel[width];
+            _width = width;
+        }
+
+        internal void updateScanLine(CPixel[] data)
+        {
+            // indicate where the difference is
+            if (data.GetHashCode()!= _data.GetHashCode())
+            {
+                // Different.  Mark the first difference.
+                for (int i=0; i<_width; i++)
+                {
+                    if (_data[i].GetHashCode() != data[i].GetHashCode())
+                    {
+                        _colChangedStart = i + 1;
+                        break;
+                    }
+                }
+                for (int i = _width; i >=0; i--)
+                {
+                    if (_data[i].GetHashCode() != data[i].GetHashCode())
+                    {
+                        _colChangedEnd = i;
+                        break;
+                    }
+                }
+                _data = data;
+            } else
+            {
+                // Same
+                _colChangedStart = 0;
+                _colChangedEnd = 0;
+            }
+        }
+
+        internal void updateScanLine(int x, CPixel cPixel)
+        {
+            if (_data[x].GetHashCode() != cPixel.GetHashCode())
+            {
+                _colChangedStart = Math.Min(x, _colChangedStart);
+                _colChangedEnd = Math.Max(x, _colChangedEnd);
+                _data[x] = cPixel;
+            }
+        }
+
+        internal void clearScanLine(int color)
+        {
+            _colChangedStart = 1;
+            _colChangedEnd = _width;
+            CPixel pixel = new CPixel(color);
+            for (int i = 0; i < _width; i++)
+            {
+                _data[i] = pixel;
+            }
+        }
+
+        internal bool isDiff()
+        {
+            return _colChangedStart > 0 || _colChangedEnd > 0;
+        }
+
+        internal void resetChange()
+        {
+            _colChangedEnd = 0;
+            _colChangedStart = 0;
+        }
+
+        internal IEnumerable<byte> getData(int diffXstart, int diffXend)
+        {
+            List<byte> t = new List<byte>();
+            int w = (diffXend - diffXstart)+1;
+            CPixel[] l = new CPixel[w];
+            Array.Copy(_data, diffXstart-1, l, 0, w);
+            foreach (CPixel p in l)
+            {
+                t.Add(p.hicolor);
+                t.Add(p.locolor);
+            }
+            return t.ToArray<byte>();
+        }
     }
 }
